@@ -1,0 +1,79 @@
+name: condertech-gov
+x-app-env: &app-env
+  ConnectionStrings__Postgres: Host=postgres;Database=condertechgov;Username=gov;Password=${POSTGRES_PASSWORD:?Configure .env}
+  ConnectionStrings__Redis: redis:6379,password=${REDIS_PASSWORD:?Configure .env}
+  Storage__Endpoint: http://storage:8333
+  Storage__AccessKey: ${S3_ACCESS_KEY:?Configure .env}
+  Storage__SecretKey: ${S3_SECRET_KEY:?Configure .env}
+  Storage__Bucket: gov-private
+  Scanner__Host: scanner
+  Smtp__Host: mailpit
+  Smtp__Port: 1025
+  Smtp__EnableSsl: false
+  Smtp__From: noreply@example.gov.br
+  ASPNETCORE_ENVIRONMENT: Development
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: condertechgov
+      POSTGRES_USER: gov
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U gov -d condertechgov]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --requirepass, '${REDIS_PASSWORD}']
+  storage:
+    image: chrislusf/seaweedfs:4.48
+    command: mini -dir=/data
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET: gov-private
+    volumes: [object-data:/data]
+  scanner:
+    image: clamav/clamav:stable
+    volumes: [scanner-data:/var/lib/clamav]
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: ['127.0.0.1:8025:8025']
+  migrate:
+    build: .
+    environment:
+      <<: *app-env
+      Jwt__Key: ${JWT_KEY:?Configure .env}
+      Platform__ProvisioningKey: ${PROVISIONING_KEY:?Configure .env}
+    command: [--migrate]
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    build: .
+    environment:
+      <<: *app-env
+      Jwt__Key: ${JWT_KEY:?Configure .env}
+      Platform__ProvisioningKey: ${PROVISIONING_KEY:?Configure .env}
+    ports: ['127.0.0.1:8080:8080']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage: {condition: service_started}
+      redis: {condition: service_started}
+  worker:
+    build:
+      context: .
+      args: {APP_PROJECT: Worker}
+    entrypoint: [dotnet, CondertechGov.Worker.dll]
+    environment: *app-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage: {condition: service_started}
+      scanner: {condition: service_started}
+      mailpit: {condition: service_started}
+volumes:
+  postgres-data:
+  object-data:
+  scanner-data:
